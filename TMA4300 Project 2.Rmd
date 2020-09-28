@@ -1,0 +1,386 @@
+---
+title: "TMA4300 Project 2"
+author: "Atle Wiig-Fisketjøn"
+date: "10.05.2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Problem A
+
+## 1
+
+We analyze a data set of time intervals between successive coal-mining disasters in the UK from March 15th 1851 to March 22nd 1962. There were 189 disasters in the time period. We begin by examining the plot of the disasters.
+
+```{r}
+library(boot)
+y = seq(0, 190)
+plot(coal$date, y, xlab = 'Year', ylab = 'Cumulative # of disasters')
+```
+
+We observe that there is a much higher density of disasters until around year 1900, than after. This could be the result of possible stricter safety measurements implemented around year 1900. Also note there seem to be a fixed rate of disasters from 1860 to 1900, and a smaller fixed rate from 1900 to 1940, and very few disasters the last 20 years of the dataset.
+
+## 2
+
+We adopt a hierarchical Bayesian model. Assume the disasters follow an inhomogeneous Poisson process with intensity function $\lambda(t)$ (number of events per year). Let $t_0$ and $t_{n+1}$ denote start and end times for the data set. We have the likelihood function 
+
+$$
+f(\mathbf{x} \lvert t_1, \ldots, t_n, \lambda_1, \ldots, \lambda_n) = \exp \left( -\sum^n_{k=0} \lambda_k (t_{k+1} - t_k) \right) \prod^n_{k=0}\lambda_k ^{y_k}
+$$
+
+where $\mathbf{x}$ is the observed data, and $y_k$ is the observed number of disasters from $t_k$ to $t_{k+1}$. We assume $t_1, \ldots, t_n$ to be apriori uniformly distributed, and $\lambda_0, \ldots, \lambda_n$ to be apriori independent of $t_1, \ldots, t_n$ and of each other. Furthermore, we assume a gamma distribution for all $\lambda_i$ with shape $\alpha=2$ and scale $\beta$, i.e.
+
+$$
+f(\lambda_i \lvert \beta) = \frac{1}{\beta^2} \lambda_i e^{-\frac{\lambda_i}{\beta}}, \quad \text{for } \lambda_i \geq 0.
+$$
+
+For $\beta$ we assign an improper prior
+$$
+f(\beta) \propto \frac{e^{-{\frac{1}{\beta}}}}{\beta} \quad \text{for } \beta > 0.
+$$
+We also assume $n=1$, so model parameters are $\mathbf{\theta} = (t_1, \lambda_0, \lambda_1, \beta)$.
+
+We now want to find the posterior distribution $f(\mathbf{\theta} \lvert \mathbf{x})$ up to a normalizing constant. Use the fact that $f(\mathbf{\theta} \lvert \mathbf{x}) \propto f(\mathbf{\theta}, \mathbf{x})$ to get:
+
+\begin{align*}
+f(\mathbf{\theta} \lvert \mathbf{x}) & \propto f(\mathbf{\theta}, \mathbf{x}) \\
+& = f(\mathbf{x} \lvert t_1, \lambda_0, \lambda_1, \beta) \cdot f(t_1) \cdot f(\lambda_0, \lambda_1 \lvert \beta) \cdot f(\beta) \\
+& \propto \left[ \exp \left( -\lambda_0(t_1-t_0) - \lambda_1 (t_2-t_1)  \right) \lambda_0 ^{y_0} \lambda_1 ^{y_1} \right] \left[ \frac{1}{\beta^4} \lambda_0 \lambda_1 e^{-\frac{1}{\beta} (\lambda_0 + \lambda_1)} \right] \left[ \frac{e^{-{\frac{1}{\beta}}}}{\beta} \right].
+\end{align*}
+
+## 3
+
+We now want to find the full conditionals for each of the elements in $\mathbf{\theta}$. 
+
+$$
+f(t_1 \lvert \lambda_0, \lambda_1, \beta, \mathbf{x}) \propto e^{-t_1(\lambda_0 - \lambda_1)} \lambda_0 ^{y_0} \lambda_1^{y_1}, 
+$$
+
+which does not belong to any standard distribution.
+
+$$
+f(\lambda_0 \lvert t_1, \lambda_1, \beta, \mathbf{x}) \propto \lambda_0^{y_0+1} e^{-\lambda_0 (\frac{1}{\beta} + t_1 - t_0)},
+$$
+
+recognised as gamma distribution, $\lambda_0 \lvert \cdot  \sim \text{Gamma}(y_0 + 2, \frac{1}{\beta} + t_1 - t_0)$.
+
+$$
+f(\lambda_1 \lvert t_1, \lambda_0, \beta, \mathbf{x}) \propto \lambda_1^{y_1+1} e^{-\lambda_1 (\frac{1}{\beta} + t_2 - t_1)},
+$$
+
+recognised as gamma distribution, $\lambda_1 \lvert \cdot \sim \text{Gamma}(y_1 + 2, \frac{1}{\beta} + t_2 - t_1)$.
+
+$$
+f(\beta \lvert t_1, \lambda_0, \lambda_1, \mathbf{x}) \propto \beta^{-5} e^{-\frac{1}{\beta}(1+\lambda_0 + \lambda_1)},
+$$
+
+which is an inverse gamma distribution $\beta \lvert \cdot \sim \text{Inv-Gamma}(4, 1+\lambda_0 + \lambda_1)$.
+
+## 4
+
+To estimate the posterior $f(\mathbf{\theta} \lvert \mathbf{x})$, we use a single-site MCMC algorithm. We can use a Gibbs update for $\beta, \lambda_0$ and $\lambda_1$ as these are from known distributions, and for $t_1$ we use a Metropolis-Hasting update. As proposal distribution for $t_1$ we use a random walk with normal density, i.e. $\mathcal{N}(t_1^{k-1}, \sigma^2)$
+
+```{r}
+library(invgamma) #to be able to draw from inverse-gamma
+t0 = coal$date[1] #start time
+t2 = coal$date[dim(coal)[1]] #end time
+
+
+#compute the logarithm of the value from the full conditional of t1
+t1_distr_log <- function(t_1, lambda_0, lambda_1, y_0, y_1) {
+  return (-t_1*(lambda_0 - lambda_1) + y_0 * log(lambda_0) + y_1 * log(lambda_1))
+}
+
+#input parameters: K = number of iterations, sigma = sd in t1~N(t1, sigma^2)
+MCMC_singlesite <-function(K, sigma){
+  
+  #declare vectors to store simulated parameter values
+  lambda0 = rep(NA, K)
+  lambda1 = rep(NA, K)
+  beta = rep(NA, K)
+  t1 = rep(NA, K)
+  
+  #initialize the parameters
+  lambda0[1] = 1
+  lambda1[1] = 1
+  beta[1] = 1
+  t1[1] = mean(coal$date)
+  
+  for (k in (2:K)){
+    y0 = sum((coal$date<=t1[k-1]))-1 #subtract t0-element
+    y1 = 189-y0
+    
+    lambda0[k] = rgamma(1, y0+2, 1/beta[k-1] + t1[k-1] - t0) #gibbs
+    lambda1[k] = rgamma(1, y1+2, 1/beta[k-1] + t2 - t1[k-1]) #gibbs
+    beta[k] = rinvgamma(1, 4, 1+lambda0[k]+lambda1[k]) #gibbs
+  
+    #metropolis hasting for t1
+  
+    prop = rnorm(1, mean= t1[k-1], sd = sigma) #random walk proposal, normal
+    #prop = runif(1, (t1[k-1])-sigma, t1[k-1]+sigma) #random walk, unif
+    
+    if (prop>=t2 || prop <= t0){ #must be in interval <t0, t2>
+      accept = 0
+    }
+    else {
+      log_alpha = t1_distr_log(prop, lambda0[k], lambda1[k], y0, y1) - t1_distr_log(t1[k-1], lambda0[k], lambda1[k], y0, y1)
+      
+      accept = min(1, exp(log_alpha))
+    }
+    
+    u = runif(1) #sample from u(0,1)
+    if (u<accept){
+      t1[k] = prop
+    }
+    else{
+      t1[k] = t1[k-1]
+    }
+  }
+  return (data.frame(lambda0, lambda1, beta, t1))
+}
+
+```
+
+## 5
+
+We use $K=3000$ iterations, and $\sigma=5$ for the random walk proposal.
+
+```{r}
+K = 3000 #number of iterations
+sigma1 = 0.5 #tuning parameter, variance for random walk proposal
+sigma2 = 5
+sigma3 = 25
+
+df2 =  MCMC_singlesite(K, sigma2)
+```
+
+We create trace plots for the different parameters, one for all iterations, and one for the first 100 iterations to inspect the burn-in rate.
+
+```{r}
+par(mfrow=c(2,1), cex=0.6)
+plot(df2$lambda0, xlab = 'Iterations', ylab = expression(lambda[0]))
+plot(df2$lambda0[0:100], xlab = 'Iterations', ylab = expression(lambda[0]))
+```
+
+```{r}
+par(mfrow=c(2,1), cex=0.6)
+plot(df2$lambda1, xlab = 'Iterations', ylab = expression(lambda[1]))
+plot(df2$lambda1[0:100], xlab = 'Iterations', ylab = expression(lambda[1]))
+```
+
+
+```{r}
+par(mfrow=c(2,1), cex=0.6)
+plot(df2$beta, xlab = 'Iterations', ylab = expression(beta))
+plot(df2$beta[0:100], xlab = 'Iterations', ylab = expression(beta))
+``` 
+
+```{r}
+par(mfrow=c(2,1), cex=0.6)
+plot(df2$t1, xlab = 'Iterations', ylab = expression('t'[1]))
+plot(df2$t1[0:100], xlab = 'Iterations', ylab = expression('t'[1]))
+```
+
+From the trace-plots we observe that the burn-in is about 20 iterations. The mixing also seems good for all the parameters. We can compare the trace plots to the plot we created in $1)$, and we compute estimated mean
+```{r}
+lambda0_mean = mean(df2$lambda0[20:K]) #burn-in is 20 iterations
+lambda1_mean = mean(df2$lambda1[20:K])
+t1_mean = mean(df2$t1[20:K]) 
+
+cat("Estimate of posterior mean for lambda0: ", lambda0_mean, "\n")
+cat("Estimate of posterior mean for lambda1: ", lambda1_mean, "\n")
+cat("Estimate of posterior mean for t1: ", t1_mean, "\n")
+```
+
+We see that the estimated value for $\hat t_1$ is `r t1_mean`, with corresponding values $\hat \lambda(0) =$ `r lambda0_mean` and $\hat \lambda(1) =$ `r lambda1_mean`. This we interpret as a rate of `r lambda0_mean` disasters per year from year 1851 to $\hat t_1$, and `r lambda1_mean` disasters per year from $\hat t_1$ to 1962. This is somewhat correct compared to the original plot in 1), however it intuitively would make more sense to have $\hat t_1$ closer to year 1900.
+
+## 6
+
+The algorithm has a tuning parameter, namely $\sigma$ in the random walk proposal. In the previous we used $\sigma=5$. We want to see how the value of $\sigma$ influences the burn-in period and limiting distribution. We try $\sigma =0.5$ and $\sigma=25$.
+
+
+```{r}
+par(mfrow=c(2,2))
+df1 =  MCMC_singlesite(K, sigma1) #sigma1 = 0.5
+plot(df1$lambda0, xlab = 'Iterations', ylab = expression(lambda[0]))
+plot(df1$lambda1, xlab = 'Iterations', ylab = expression(lambda[1]))
+plot(df1$beta, xlab = 'Iterations', ylab = expression(beta))
+plot(df1$t1, xlab = 'Iterations', ylab = expression('t'[1]))
+```
+
+We see that a smaller value for $\sigma$ gives a longer burn-in period, about $400$ iterations for $\sigma=0.5$. To check if this influence the limiting distribution, we compute the estimated posterior mean of the different parameters:
+
+```{r}
+lambda0_mean = mean(df1$lambda0[400:K])
+lambda1_mean = mean(df1$lambda1[400:K])
+t1_mean = mean(df1$t1[400:K]) 
+
+cat("Estimate of posterior means for sigma=0.5: \n")
+cat("Lambda0: ", lambda0_mean, "\n")
+cat("Lambda1: ", lambda1_mean, "\n")
+cat("t1: ", t1_mean, "\n")
+```
+
+Now we do the same for a larger value for the tuning parameter, $\sigma = 25$.
+
+```{r}
+df3 =  MCMC_singlesite(K, sigma3) #sigma3 = 25
+
+par(mfrow=c(2,2))
+plot(df3$lambda0, xlab = 'Iterations', ylab = expression(lambda[0]))
+plot(df3$lambda1, xlab = 'Iterations', ylab = expression(lambda[1]))
+plot(df3$beta, xlab = 'Iterations', ylab = expression(beta))
+plot(df3$t1, xlab = 'Iterations', ylab = expression('t'[1]))
+```
+
+We observe that the burn-in period vanishes almost completely, but inspecting a plot of only the first $100$ iterations shows a burn-in period at about 10 iterations. We compute the estimated posterior means as before:
+
+```{r}
+lambda0_mean = mean(df3$lambda0[10:K])
+lambda1_mean = mean(df3$lambda1[10:K])
+t1_mean = mean(df3$t1[10:K]) 
+
+cat("Estimate of posterior means for sigma=25: \n")
+cat("Lambda0: ", lambda0_mean, "\n")
+cat("Lambda1: ", lambda1_mean, "\n")
+cat("t1: ", t1_mean, "\n")
+```
+
+Again, we see that the estimated posterior means are almost the same as before. Had we used a larger number of iterations $K$, the estimates should have been the same. This shows that the tuning parameter influences the burn-in period, but not the limiting distribution.
+
+
+# Problem B
+
+We will analyze a simulated time series, and begin by plotting the data.
+```{r}
+data = read.table("https://www.math.ntnu.no/emner/TMA4300/2020v/Exercise/exercise2/Gaussiandata.txt")
+n = dim(data)[1]
+plot(data$V1, xlab = 't', ylab = 'y')
+```
+
+
+Given vector $\mathbf{\eta} = (\eta_1, \ldots, \eta_T)$, assume observations $y_t$ to be Gaussian distributed with mean $\eta_t$ and known unit variance, i.e.
+
+$$
+y_t \lvert \eta_t \sim \mathcal{N}(\eta_t, 1); \quad t=1,\ldots, T.
+$$
+
+The linear predictor $\eta_t$ is linked to a smooth effect of time t as $\eta_t = f_t$. We choose a second order random walk model as prior distribution for $\mathbf{f} = (f_1, \ldots, f_T)$, so that
+
+$$
+\pi(\mathbf{f}\lvert \theta) \propto \theta^{(T-2)/2} \exp \left \{ -\frac{\theta}{2} \sum_{t=3}^T [f_t - 2f_{t-1} + f_{t-2}]^2) \right \} \sim \mathcal{N}(\mathbf{0, Q}(\theta)^{-1}).
+$$
+
+Hence $\mathbf{f} \lvert \theta$ is Gaussian distributed with mean $\mathbf{0}$ and precision matrix $\mathbf{Q}(\theta)$, which is a band matrix with bandwidth $2$ and hence sparse. We assign $\theta$ a prior Gamma distribution $\theta \sim \text{Gamma}(1,1)$, i.e. $\pi(\theta) = e^{-\theta}$.
+
+## 1
+
+The linear predictor $\eta_t$ is linked to $f_t$, so the latent field is $\mathbf{x} = (f_1, \ldots, f_T)$. We have that $\mathbf{x} \lvert \theta \sim \mathcal{N}(\mathbf{0, Q}(\theta)^{-1})$, which is Gaussian. Hence we have a latent Gaussian model, and we can therefore use INLA to estimate the parameters.
+
+## 2
+
+We now want to implement a block Gibbs sampling algorithm for $f(\eta, \theta \lvert y)$ using the following block proposals: $\theta$ from full conditional $\pi(\theta \lvert \eta, y)$ and vector $\eta$ from full conditional $\pi(\eta \lvert \theta, y)$. First we need to find expressions for the full conditionals, and begin by deriving an expression for the posterior distribution.
+
+\begin{align*}
+f(\eta, \theta \lvert y)  & \propto f(\eta, \theta, y) \\
+& = f(y \lvert \eta, \theta) \cdot f(\eta, \theta) \\
+&= f(y \lvert \eta, \theta) \cdot f(\eta \lvert \theta) \cdot f(\theta) \\
+& \propto \left[ \prod_{t=1}^T \exp \left( -\frac{1}{2}(y_t - \eta_t)^2 \right)  \right] \cdot \left[ \theta^{(T-2)/2} \exp\left(-\frac{\theta}{2} \sum_{t=3}^T [f_t - 2f_{t-1} + f_{t-2}]^2\right) \right] \cdot \exp (-\theta)
+\end{align*}
+
+The full conditionals are given by
+
+$$
+\pi(\theta \lvert \eta, y) \propto \theta^{(T-2)/2} \exp\left( -\theta \left( 1+ \frac{1}{2} \sum_{t=3}^T [\eta_t - 2\eta_{t-1} + \eta_{t-2}]^2\right)\right),
+$$
+
+which is a Gamma distribution, i.e. $\theta \lvert \eta, y \sim \text{Gamma}\left(\frac{T}{2}, 1+\frac{1}{2} \sum_{t=3}^T [\eta_t - 2\eta_{t-1} + \eta_{t-2}]^2\right)$, and 
+
+\begin{align*}
+\pi(\eta \lvert \theta, y) & \propto \left[ \prod_{t=1}^T \exp \left( -\frac{1}{2}(y_t - \eta_t)^2 \right)  \right] \exp\left(-\frac{\theta}{2} \sum_{t=3}^T [\eta_t - 2\eta_{t-1} + \eta_{t-2}]^2\right) \\
+& = \exp\left(-\frac{\theta}{2} \sum_{t=3}^T [\eta_t - 2\eta_{t-1} + \eta_{t-2}]^2 - \frac{1}{2}\sum_{t=1}^T(\eta_t - y_t)^2 \right) \\
+& = \exp \left( -\frac{1}{2} \eta^\top \mathbf{Q}(\theta)\eta  -\frac{1}{2}(\eta - y)^\top \mathbf{I} (\eta-y) \right) \\
+&= \exp \left( -\frac{1}{2} \left( \eta^\top Q \eta + \eta^\top \mathbf{I} \eta + y^\top \mathbf{I} y \right) + y^\top \mathbf{I} \eta \right)\\
+& \propto \exp \left( y^\top \eta -\frac{1}{2} \eta^\top (\mathbf{Q} + \mathbf{I}) \eta \right),
+\end{align*}
+
+which is a Gaussian density written in canonical form. Hence$\eta \lvert \theta, y \sim \mathcal{N}\left((\mathbf{Q}(\theta)+ \mathbf{I})^{-1}y, (\mathbf{Q}(\theta) + \mathbf{I})^{-1}\right)$.
+To sample from these, we first need to define the matrix $\mathbf{Q}$:
+
+```{r}
+#create Q
+Q0 = matrix(0, nrow= n, ncol = n)
+for (i in(3:n)){
+  Q0[i, c(i-2, i-1, i)] = c(1, -2, 1)
+}
+Q = t(Q0) %*% (Q0)
+```
+
+Now we implement the Gibbs sampling algorithm, with block updates. To sample from the multivariate Gaussian distribution, we use the property:
+Let $\mathbf{x} \sim \mathcal{N}_d (\mathbf{0}, \mathbf{1})$. Then for $\mathbf{y} = \mathbf{\mu} + \mathbf{A x}$, we have that $\mathbf{y} \sim \mathcal{N}_d ( \mu, \mathbf{AA^\top})$. To sample from $\eta \lvert \theta, y$, we need to compute the cholesky factorization $\mathbf{A}$ of $(\mathbf{Q}(\theta) + \mathbf{I})^{-1}$. The algorithm is then the following:
+
+```{r}
+library(matlib) #to use inv-function
+n = dim(data)[1]
+K = 1000 #number of iterations
+theta = rep(NA, K) #vector to store samples for theta
+eta = matrix(1, nrow = K, ncol = n) #matrix to store sampled vectors for eta, row-wise
+
+y_data = data$V1
+
+
+#initialize
+theta[1] = 1
+eta[1,] = 1
+
+
+for (k in (2:K)){
+  #sample theta from gamma(n/2,)
+  theta[k] = rgamma(1, n/2, 1 + 1/2 * (eta[1,] %*% Q %*% eta[1,]))
+  
+  #compute cov_matrix 
+  cov_mat = inv(theta[k]*Q + diag(1, n)) #(Q+I)^{-1}
+  A = chol(cov_mat) #cholesky factorization
+  x = rnorm(n) #sample x from N(0, 1)
+  
+  #sample eta from gaussian distr
+  eta[k,] =  cov_mat %*% y_data + A %*% x #y = mu + Ax, s.t. y~N(mu, AA^T)
+}
+```
+
+Let us first check for burn-in period:
+```{r}
+plot(theta, xlab = "iterations", ylab = "theta")
+```
+
+The burn-in period seems to be about $50$ iterations. We now want to estimate the posterior marginal $\pi (\theta \lvert y)$:
+```{r}
+plot(density(theta))
+cat('Estimated posterior mean for theta: ',  mean(theta[50:K]), "\n")
+cat('Estimated posterior sd for theta: ', sd(theta[50:K]), "\n")
+```
+
+We also want an estimate of the smooth effect $\mathbf{\eta}$:
+```{r}
+cat('Estimated posterior mean for eta: \n [', colMeans(eta[50:K,]), "]")
+```
+
+We will also plot the estimated mean along with the 95% confidence interval, using the $2.5\%$  and $97.5\%$ quantiles of the sorted estimated values.  
+
+```{r}
+#95% confidence interval
+sorted = apply(eta, 2, sort)
+lower = sorted[round(K*0.025),] #2.5% quantile
+upper = sorted[round(K*0.975),] #97.5% quantile
+
+plot(data$V1, xlab = "t", ylab = "y") #observations
+lines(colMeans(eta), lty = 1) #mean
+lines(upper) 
+lines(lower)
+polygon(c(seq(1:20), rev(seq(1:20))), c(lower, rev(upper)), density = 30) #fill
+```
